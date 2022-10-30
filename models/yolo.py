@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import sys
 from copy import deepcopy
@@ -73,7 +74,7 @@ class Model(nn.Module):
             import yaml  # for torch hub
             self.yaml_file = Path(cfg).name
             with open(cfg) as f:
-#                self.yaml = yaml.load(f, Loader=yaml.SafeLoader)  # model dict
+                # self.yaml = yaml.load(f, Loader=yaml.SafeLoader)  # model dict
                 self.yaml = yaml.load(f, Loader=PrettySafeLoader)  # model dict
 
         # Define model
@@ -84,7 +85,7 @@ class Model(nn.Module):
         if anchors:
             logger.info(f'Overriding model.yaml anchors with anchors={anchors}')
             self.yaml['anchors'] = round(anchors)  # override yaml value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
+        self.model, self.save, self.layer_info = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
@@ -126,7 +127,7 @@ class Model(nn.Module):
 
     def forward_once(self, x, profile=False):
         y, dt = [], []  # outputs
-        for m in self.model:
+        for idx, m in enumerate(self.model):
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
 
@@ -137,6 +138,9 @@ class Model(nn.Module):
                     _ = m(x)
                 dt.append((time_synchronized() - t) * 100)
                 print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
+                # save profile result as a dict then json
+                self.profile = {'FLOPS': o, 'params': m.np, 'time': dt[-1], 'type': str(m)}
+                json.dump(self.profile, open(f'latency/{m.type.replace("models.common.", "")}_{self.layer_info[idx]}.json', 'w'), indent=4)
 
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
@@ -216,14 +220,16 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
+    info = []
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
         if m in ['SPP_search']: m = m.split('_')[0]
-        m = eval(m) if isinstance(m, str) else m  # eval strings
+        m = eval(m) if isinstance(m, str) else m  # eval stringsl; 아직 instance 화 되지 않음
         for j, a in enumerate(args):
             try:
                 args[j] = eval(a) if isinstance(a, str) else a  # eval strings
             except:
                 pass
+
         if isinstance(args[-1], dict): args_dict = args[-1]; args = args[:-1]
         else: args_dict = {}
 
@@ -273,6 +279,8 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             c2 = ch[f]
 
         m_ = nn.Sequential(*[m(*args, **args_dict) for _ in range(n)]) if n > 1 else m(*args, **args_dict)  # module
+        info.append(str(args)+str(args_dict)) if args_dict else info.append(str(args))
+
         t = str(m)[8:-2].replace('__main__.', '')  # module type
         np = sum([x.numel() for x in m_.parameters()])  # number params
         m_.i, m_.f, m_.type, m_.np = i, f, t, np  # attach index, 'from' index, type, number params
@@ -285,7 +293,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
           ch.append(c2*len(args[1])) # args[1] = concat
         elif isinstance(c2, list): ch.append(c2[-1])
         else: ch.append(c2)
-    return nn.Sequential(*layers), sorted(save)
+    return nn.Sequential(*layers), sorted(save), info
 
 
 if __name__ == '__main__':
@@ -302,8 +310,8 @@ if __name__ == '__main__':
     model.train()
 
     # Profile
-    # img = torch.rand(8 if torch.cuda.is_available() else 1, 3, 640, 640).to(device)
-    # y = model(img, profile=True)
+    img = torch.rand(8 if torch.cuda.is_available() else 1, 3, 640, 640).to(device)
+    y = model(img, profile=True)
 
     # Tensorboard
     # from torch.utils.tensorboard import SummaryWriter
