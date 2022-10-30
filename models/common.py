@@ -16,6 +16,7 @@ from utils.plots import color_list, plot_one_box
 from models.darts_cell import Search_cell, Cell, PRIMITIVES
 from models.mergenas_cell import Search_cell_merge
 from models.custom_utils import autopad, gumbel_softmax
+
 #from mish_cuda import MishCuda as Mish
 
 
@@ -41,6 +42,9 @@ class Conv(nn.Module):
 
     def fuseforward(self, x):
         return self.act(self.conv(x))
+
+    def get_name(self,x):
+        return f"Conv_k{self.conv.kernel_size}_d{self.conv.dilation}_o{self.conv.out_channels}_r{x.shape[-1]}"
 
 class SepConv(nn.Module):
     # Standard convolution
@@ -73,39 +77,6 @@ class Bottleneck(nn.Module):
 
     def forward(self, x):
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
-
-class Conv_search(nn.Module):
-    # Mixed Depthwise Conv https://arxiv.org/abs/1907.09595
-    def __init__(self, c1, c2, kd=[(1,1), (3,1), (5,1), (3,2)], s=1, p=None, g=1, act=True, gumbel_op=False):
-        super(Conv_search, self).__init__()
-        self.gumbel_op = gumbel_op
-        self.m = nn.ModuleList([])
-        for ks in range(len(kd)):
-          kernel_size = kd[ks][0]
-          dilation = kd[ks][1]
-          tmp = nn.Sequential(nn.Conv2d(c1, c2, kernel_size, s, autopad(kernel_size, p, dilation), dilation=dilation, groups=g, bias=False), nn.BatchNorm2d(c2))
-          self.m.append(tmp)
-        self.act = nn.SiLU() if act is True else (act if isinstance(act, nn.Module) else nn.Identity())
-#        self._alphas = torch.autograd.Variable(1e-3*torch.randn(len(k)), requires_grad=True)
-        self.register_buffer('alphas', torch.autograd.Variable(1e-3*torch.randn(len(kd)), requires_grad=True))
-        
-    def forward(self, x):
-        if self.gumbel_op: 
-            alphas = gumbel_softmax(F.log_softmax(self.alphas, dim=-1), hard=True)
-            index = alphas.max(-1, keepdim=True)[1].item()
-            return self.act( alphas[index] * self.m[index](x) )
-        else:
-            alphas = F.softmax(self.alphas, dim=-1)
-            return self.act(sum([a * m(x) for m, a in zip(self.m, alphas)]))
-
-    def get_alphas(self):
-        return [self.alphas]
-
-    def get_op_alphas(self):
-        return [self.alphas]
-
-    def get_ch_alphas(self):
-        return [None]
 
 class Conv_search_merge(nn.Module):
     # Mixed Depthwise Conv https://arxiv.org/abs/1907.09595
@@ -168,14 +139,14 @@ class Conv_search_merge(nn.Module):
         Cin = x.size(1)
         bn = self.bn
         bias = self.bias
-        if len(self.kd) > 1:
+        if len(self.kd) > 1:  # kernel 고르기
           alphas = nn.functional.softmax(self.alphas, dim=-1)
           merge_kernel = self.get_merge_kernel(self.weight, alphas)
         else:
           alphas = []
           merge_kernel = self.weight
 
-        if len(self.candidate_e) > 1:
+        if len(self.candidate_e) > 1:  #  채널 고르기
           Cout = merge_kernel.size(0)
           channel_mask = torch.zeros([Cout], dtype=merge_kernel.dtype, device=merge_kernel.device)
           if self.gumbel_channel:
@@ -198,10 +169,16 @@ class Conv_search_merge(nn.Module):
         
         for i, alpha in enumerate(alphas):
           k,d = self.kd[i]
-          if k==0: out = out + 0.*alpha
-          elif d == 0: out = out + x*alpha
-        if bias is None: return self.act(bn(out))
-        else: return self.act(bn(out)) + bias.view(1,-1,1,1)
+          if k==0:
+            out = out + 0.*alpha
+          elif d == 0:
+            out = out + x*alpha
+
+        # alphas_channel 
+        # lat = Estimator[kernel] * alphas_channel * self.alphas
+        if bias is None:
+          return self.act(bn(out))#, lat
+        else: return self.act(bn(out)) + bias.view(1,-1,1,1)#, lat
 
     def forward_withAlpha(self, x, alphas_channel):
         assert len(self.candidate_e)==len(alphas_channel)
@@ -499,6 +476,8 @@ class C3(nn.Module):
 
         self.cv1 = Conv(c1, c1out, k=1, d=1, s=1)
         m_list = []; cin = c1out
+
+        self.n_bottle = n
         for i in range(n):
           m_list.append(Bottleneck(cin, int(c2[i]*e), ks[i], ds[i], shortcut, g, e=es[i], separable=separable))
           cin = int(c2[i]*e)
@@ -508,8 +487,17 @@ class C3(nn.Module):
         self.cv2 = Conv(c1, c2out, k=1, d=1, s=1)
         self.cv3 = Conv(2 * c2out, c2[-1], k=1, d=1, s=1)  # act=FReLU(c2)
 
+        self.cv1_out = c1out
+        self.cv2_out = c2out
+        self.ks = ks
+        self.ds = ds
+        self.es = es
+
     def forward(self, x):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
+
+    def get_name(self,x):
+        return f"C3_c1{self.cv1_out}_c2{self.cv2_out}_ks{'-'.join(map(str,self.ks))}_ds{'-'.join(map(str,self.ds))}_es{'-'.join(map(str, self.es))}_r{x.shape[-1]}"
 
 class C3_search(nn.Module):
     # CSP Bottleneck with 3 convolutions
@@ -584,9 +572,9 @@ class C3_search_merge(nn.Module):
             raise(ValueError("If code runs here, then there must be something wrong!"))
           else:
             alphas_channel = nn.functional.softmax(self.alphas_channel, dim=-1)
-            return self.cv3.forward_withAlpha(torch.cat((self.m(self.cv1.forward_withAlpha(x, alphas_channel)), self.cv2.forward_withAlpha(x, alphas_channel)), dim=1), alphas_channel)
+            return self.cv3.forward_withAlpha(torch.cat((self.m(self.cv1.forward_withAlpha(x, alphas_channel)), self.cv2.forward_withAlpha(x, alphas_channel)), dim=1), alphas_channel), lat
         else:
-          return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
+          return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1)), lat
 
     def get_alphas(self):
         alphas = []
@@ -640,7 +628,7 @@ class Cells_search(nn.Module):
           for cell in self.cells:
             s1 = cell([s1], weights)
             
-        return s1
+        return s1, lat
 
     def get_alphas(self):
         alphas = self.get_op_alphas()
@@ -687,7 +675,7 @@ class Cells_search_merge(nn.Module):
           for cell in self.cells:
             s1 = cell([s1], weights)
             
-        return s1
+        return s1, lat
 
     def get_alphas(self):
         alphas = self.get_op_alphas()
@@ -772,7 +760,7 @@ class AFF(nn.Module):
        else:
          for idx, (m, up, x) in enumerate(zip(self.m, self.up_sample, xs)):
            out += up(m(x)) * alphas_edge[idx]
-       return out
+       return out #, lat
  
     def get_alphas(self):
         out = [self.alphas_edge]
@@ -841,6 +829,9 @@ class FF(nn.Module):
            out += up(m(x))
        return out
 
+    def get_name(self,xs):
+        return f"FF_i{'-'.join(map(str,self.cin))}_o{self.cout}_xs{'-'.join([str(x.shape[-1]) for x in xs])}"
+
 
 class SPP(nn.Module):
     # Spatial pyramid pooling layer used in YOLOv3-SPP
@@ -851,9 +842,16 @@ class SPP(nn.Module):
         self.cv2 = Conv(c_ * (len(k) + 1), c2, k=1, d=1, s=1)
         self.m = nn.ModuleList([nn.MaxPool2d(kernel_size=x, stride=1, padding=x // 2) for x in k])
 
+        self.k = k
+        self.c1 = c1
+        self.c2 = c2
+
     def forward(self, x):
         x = self.cv1(x)
         return self.cv2(torch.cat([x] + [m(x) for m in self.m], 1))
+
+    def get_name(self,x):
+        return f"SPP_k{self.k}_c1{self.c1}_c2{self.c2}_r{x.shape[-1]}"
 
 class SPP_search(nn.Module):
     # Spatial pyramid pooling layer used in YOLOv3-SPP
@@ -867,7 +865,7 @@ class SPP_search(nn.Module):
 
     def forward(self, x):
         x = self.cv1(x)
-        return self.cv2(torch.cat([x] + [m(x) for m in self.m], 1))
+        return self.cv2(torch.cat([x] + [m(x) for m in self.m], 1))#, lat
 
 
 class Focus(nn.Module):
@@ -876,11 +874,16 @@ class Focus(nn.Module):
         super(Focus, self).__init__()
         self.conv = Conv(c1 * 4, c2, k, 1, s, p, g, act)
         # self.contract = Contract(gain=2)
+        self.k = k
+        self.c1 = c1
+        self.c2 = c2
 
     def forward(self, x):  # x(b,c,w,h) -> y(b,4c,w/2,h/2)
-        return self.conv(torch.cat([x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1))
+        return self.conv(torch.cat([x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1)) #, 0.7247686386108398
         # return self.conv(self.contract(x))
 
+    def get_name(self,x):
+        return f"Focus_k{self.k}_c1{self.c1}_c2{self.c2}_r{x.shape[-1]}"
 
 class Contract(nn.Module):
     # Contract width-height into channels, i.e. x(1,64,80,80) to x(1,256,40,40)
@@ -1013,6 +1016,9 @@ class Detections:
         self.xywhn = [x / g for x, g in zip(self.xywh, gn)]  # xywh normalized
         self.n = len(self.pred)
 
+    def get_name(self,x):
+        return self.names[int(x)]
+        
     def display(self, pprint=False, show=False, save=False, render=False, save_dir=''):
         colors = color_list()
         for i, (img, pred) in enumerate(zip(self.imgs, self.pred)):

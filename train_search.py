@@ -157,7 +157,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     if rank in [-1, 0] and wandb and wandb.run is None:
         opt.hyp = hyp  # add hyperparameters
         wandb_run = wandb.init(config=opt, resume="allow",
-                               project='YOLOv5' if opt.project == 'runs/train' else Path(opt.project).stem,
+                               project='YOLOv5', #if opt.project == 'runs/train' else Path(opt.project).stem,
                                name=save_dir.stem,
                                entity=opt.entity,
                                id=ckpt.get('wandb_id') if 'ckpt' in locals() else None)
@@ -357,8 +357,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                pred, latency = model(imgs)  # forward
+                loss, loss_items = compute_loss(pred, targets.to(device), latency)  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -607,6 +607,7 @@ if __name__ == '__main__':
     parser.add_argument('--search_warmup', type=int, default=0, help='Epoch to Warmup the operation weights')
     parser.add_argument('--train_portion', type=float, default=0.5, help='portion to split the train set and search set')
 
+    parser.add_argument('--no_wandb', action='store_true', help='dont init wandb')
     opt = parser.parse_args()
     opt.project = '{}-{}'.format(opt.project, time.strftime("%Y%m%d-%H%M%S"))
     print("Experiments dir: %s"%opt.project)
@@ -654,12 +655,16 @@ if __name__ == '__main__':
 
     # Train
     logger.info(opt)
-    try:
-        import wandb
-    except ImportError:
+    if opt.no_wandb:
         wandb = None
-        prefix = colorstr('wandb: ')
-        logger.info(f"{prefix}Install Weights & Biases for YOLOv5 logging with 'pip install wandb' (recommended)")
+    else:
+        try:
+            import wandb
+        except ImportError:
+            wandb = None
+            prefix = colorstr('wandb: ')
+            logger.info(f"{prefix}Install Weights & Biases for YOLOv5 logging with 'pip install wandb' (recommended)")
+
     if not opt.evolve:
         tb_writer = None  # init loggers
         if opt.global_rank in [-1, 0]:

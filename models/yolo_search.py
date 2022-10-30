@@ -152,6 +152,7 @@ class Model(nn.Module):
 
     def forward_once(self, x, profile=False):
         y, dt = [], []  # outputs
+        latency = []
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -165,11 +166,13 @@ class Model(nn.Module):
                 print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
 
             x = m(x)  # run
+            # x, lat = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
+            # latency.append(lat)
 
         if profile:
             print('%.1fms total' % sum(dt))
-        return x
+        return x #, latency.sum()
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -269,7 +272,7 @@ class Model(nn.Module):
                tmp[3][1] = k
 #               tmp[3].insert(2, d)
                tmp[3][2] = d # originally, tmp[3][2] is candidate_e, which is useless for full-train
-               if tmp[2] in ['Bottlenect']:
+               if tmp[2] in ['Bottleneck']:
                  if isinstance(tmp[3][-1], dict): tmp[3][-1]['e_bottleneck'] = e
                  else: tmp[3].append({'e_bottleneck':e})
                else: tmp[3][0] = Cout * e 
@@ -403,7 +406,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         else: args_dict = {}
 
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
-        if m in [Conv, GhostConv, Bottleneck, Bottleneck_search, GhostBottleneck, SPP, DWConv, MixConv2d, Conv_search, Focus, CrossConv, BottleneckCSP, C3, C3_search, Conv_search_merge, Bottleneck_search_merge, C3_search_merge, SPP_search]:
+        if m in [Conv, GhostConv, Bottleneck, Bottleneck_search, GhostBottleneck, SPP, DWConv, MixConv2d,  Focus, CrossConv, BottleneckCSP, C3, C3_search, Conv_search_merge, Bottleneck_search_merge, C3_search_merge, SPP_search]:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
@@ -446,7 +449,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             c2 = ch[f]
 
         m_ = nn.Sequential(*[m(*args, **args_dict) for _ in range(n)]) if n > 1 else m(*args, **args_dict)  # module
-        if m in [Conv_search, Bottleneck_search, C3_search, Conv_search_merge, Bottleneck_search_merge, C3_search_merge, AFF, Cells_search, Cells_search_merge]:
+        if m in [Bottleneck_search, C3_search, Conv_search_merge, Bottleneck_search_merge, C3_search_merge, AFF, Cells_search, Cells_search_merge]:
           m_list = [m_] if n==1 else m_
           for tmp in m_list: 
             arch_parameters.extend(tmp.get_alphas())

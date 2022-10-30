@@ -280,22 +280,20 @@ def gen_graph(hyp, opt, device, tb_writer=None, wandb=None):
                         edge_geno_idx[i - len(model.op_arch_parameters) -
                                       len(model.ch_arch_parameters)] = tmp
 
-    for geno, model_yaml in mutate(model):  # 뭘 변형시킨건지도 정보를 주자 , name, i, j 
+    
+    for geno, model_yaml in mutate(model):
         # print(geno)
         # clone_model, save, layer_info = parse_model(model_yaml, [3])
         # clone_model.to(device)
         # clone_model.eval()
 
-        clone_model = Model_yolo(model_yaml).to(device)  # superkernel 이 아니라 일반적인 yolo 모델
+        clone_model = Model_yolo(model_yaml).to(device)
         clone_model.eval()
 
         # profile_model
         x = torch.randn(1, 3, 640, 640).to(device)
         y, dt = [], []  # outputs and time
         for idx, m in enumerate(clone_model.model):
-            # if hasattr(m, 'alphas'):
-            # if hasattr(m, 'alphas_ch'):
-
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [
                     x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -305,15 +303,13 @@ def gen_graph(hyp, opt, device, tb_writer=None, wandb=None):
             t = time_synchronized()
             for _ in range(10):
                 _ = m(x)
-            dt.append((time_synchronized() - t) / 10 * 100)
+            dt.append((time_synchronized() - t) * 100)
             print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
             # save profile result as a dict then json
             profile = {'FLOPS': o, 'params': m.np,
                        'time': dt[-1], 'type': str(m)}
             json.dump(profile, open(
-                f'latency/{m.get_name(x)}.json', 'w'), indent=4)
-
-            # Estimator[m.name] = dt[-1]
+                f'latency/{m.type.replace("models.common.", "")}_{clone_model.layer_info[idx]}.json', 'w'), indent=4)
 
             x = m(x)  # run
             y.append(x if m.i in clone_model.save else None)  # save output
