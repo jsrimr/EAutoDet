@@ -15,7 +15,6 @@ from utils.general import non_max_suppression, make_divisible, scale_coords, xyx
 from utils.plots import color_list, plot_one_box
 from models.darts_cell import Search_cell, Cell, PRIMITIVES
 from models.mergenas_cell import Search_cell_merge
-from models.utils import autopad, gumbel_softmax
 from models.custom_utils import autopad, gumbel_softmax
 #from mish_cuda import MishCuda as Mish
 
